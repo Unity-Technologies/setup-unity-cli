@@ -1,0 +1,77 @@
+name: Setup Unity CLI
+description: Install the Unity CLI (`unity`) on a GitHub Actions runner and add it to PATH.
+author: Unity Technologies
+branding:
+  icon: terminal
+  color: gray-dark
+
+inputs:
+  version:
+    description: "'latest', or an exact version such as 1.0.1."
+    required: false
+    default: latest
+  channel:
+    description: "Release channel when version is 'latest': stable or beta."
+    required: false
+    default: stable
+  cache:
+    description: Cache the downloaded binary between workflow runs.
+    required: false
+    default: 'true'
+  non-interactive:
+    description: Set UNITY_NON_INTERACTIVE=1 for later steps, so no command waits on a prompt.
+    required: false
+    default: 'true'
+
+outputs:
+  version:
+    description: The installed Unity CLI version.
+    value: ${{ steps.resolve.outputs.version }}
+  path:
+    description: Full path to the installed `unity` binary.
+    value: ${{ steps.install.outputs.path }}
+  cache-hit:
+    description: Whether the binary came from the cache.
+    value: ${{ steps.restore.outputs.cache-hit == 'true' }}
+
+runs:
+  using: composite
+  steps:
+    # Inputs reach the script through env, never ${{ }} inside `run:`, so an
+    # input value cannot inject shell.
+    - name: Resolve the Unity CLI version
+      id: resolve
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_CHANNEL: ${{ inputs.channel }}
+      run: '"$GITHUB_ACTION_PATH/setup.sh" resolve'
+
+    # Keyed on the checksum, so a re-published binary never matches a stale entry.
+    - name: Restore the Unity CLI from cache
+      id: restore
+      if: inputs.cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.dir }}
+        key: unity-cli-${{ steps.resolve.outputs.platform }}-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.sha256 }}
+
+    - name: Install the Unity CLI
+      id: install
+      shell: bash
+      env:
+        RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
+        RESOLVED_FILENAME: ${{ steps.resolve.outputs.filename }}
+        RESOLVED_SHA256: ${{ steps.resolve.outputs.sha256 }}
+        RESOLVED_DIR: ${{ steps.resolve.outputs.dir }}
+        INPUT_NON_INTERACTIVE: ${{ inputs.non-interactive }}
+      run: '"$GITHUB_ACTION_PATH/setup.sh" install'
+
+    # Saved straight away rather than at job end, so a later failing step still
+    # leaves the next run a warm cache.
+    - name: Save the Unity CLI to cache
+      if: inputs.cache == 'true' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.dir }}
+        key: unity-cli-${{ steps.resolve.outputs.platform }}-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.sha256 }}

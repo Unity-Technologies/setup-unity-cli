@@ -1,0 +1,123 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Weekly, so a CDN or runner-image change is caught without a commit.
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    name: ${{ matrix.os }} · ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          [
+            ubuntu-latest,
+            ubuntu-24.04-arm,
+            macos-latest,
+            macos-15-intel,
+            windows-latest,
+            windows-11-arm,
+          ]
+        version: [latest, 1.0.1]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: setup
+        uses: ./
+        with:
+          version: ${{ matrix.version }}
+
+      - name: The installed CLI runs from PATH and matches the outputs
+        shell: bash
+        env:
+          WANT: ${{ matrix.version }}
+          GOT: ${{ steps.setup.outputs.version }}
+          BIN: ${{ steps.setup.outputs.path }}
+        run: |
+          set -euo pipefail
+          test -n "$GOT"
+          if [ "$WANT" != latest ]; then test "$GOT" = "$WANT"; fi
+          test "$(unity --version)" = "$GOT"
+          test -f "$BIN"
+          test "$UNITY_NON_INTERACTIVE" = 1
+
+      # Same job, second call: the binary is already there and must be reused.
+      - id: again
+        uses: ./
+        with:
+          version: ${{ steps.setup.outputs.version }}
+      - shell: bash
+        run: unity --version
+
+  # The oldest supported glibc, in a container image without jq or python3.
+  container:
+    runs-on: ubuntu-latest
+    container: buildpack-deps:focal-curl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./
+        with:
+          cache: 'false'
+      - run: unity --version
+
+  # musl is unsupported: the action must refuse it, not install a binary
+  # whose loader then fails.
+  rejects-musl:
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    steps:
+      - run: apk add --no-cache bash curl
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: musl
+        continue-on-error: true
+        uses: ./
+        with:
+          cache: 'false'
+      # A failed step alone proves little: a musl install also fails later, at
+      # --version. Check that the refusal itself ran and nothing was installed.
+      - name: The action refused musl
+        env:
+          OUTCOME: ${{ steps.musl.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$OUTCOME" = failure
+          if command -v unity; then exit 1; fi
+          if out="$(./setup.sh resolve 2>&1)"; then exit 1; fi
+          printf '%s' "$out" | grep -q 'musl libc'
+
+  rejects-bad-input:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: bad
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 1.0.1/../../latest
+      - name: The bad version failed the action
+        env:
+          OUTCOME: ${{ steps.bad.outcome }}
+        run: test "$OUTCOME" = failure
